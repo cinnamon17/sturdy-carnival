@@ -32,6 +32,11 @@ struct BehaviorHints {
 }
 
 #[derive(Serialize)]
+struct StreamBehaviorHints {
+    #[serde(rename = "notSupported")]
+    not_supported: bool,
+}
+#[derive(Serialize)]
 struct StreamResponse {
     streams: Vec<StreamItem>,
 }
@@ -41,6 +46,8 @@ struct StreamItem {
     name: String,
     title: String,
     url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behavior_hints: Option<StreamBehaviorHints>,
 }
 
 // --- CLIENTE ALLDEBRID DINÁMICO ---
@@ -329,31 +336,36 @@ async fn get_streams(
         .unwrap_or_else(|_| "https://stremio.lify.win".to_string());
 
     // 2. Construir la lista de streams usando t.info_hash
-    let streams = db_torrents
-        .into_iter()
-        .filter_map(|t| {
-            let hash = t.info_hash; 
-            let res_tag = t.resolution.unwrap_or_else(|| "SD".to_string());
-            let group_tag = t.release_group.unwrap_or_else(|| "RAW".to_string());
+   let streams = db_torrents
+       .into_iter()
+       .filter_map(|t| {
+           let hash = t.info_hash;
+           let res_tag = t.resolution.unwrap_or_else(|| "SD".to_string());
+           let group_tag = t.release_group.unwrap_or_else(|| "RAW".to_string());
+           let seeders = t.seeders.unwrap_or(0);
 
-            // URL corta y limpia sin extensión
-            let stream_url = format!(
-                "{}/resolve/{}/{}/{}/{}",
-                base_url, api_key, season, episode, hash
-            );
+           // URL limpia para resolver
+           let stream_url = format!(
+               "{}/resolve/{}/{}/{}/{}",
+               base_url, api_key, season, episode, hash
+           );
 
-            Some(StreamItem {
-                name: format!("⚡ [Leydinime] [{}]", res_tag),
-                title: format!(
-                    "{}\n👥 Seeders: {} | 👥 Grupo: {}",
-                    t.title,
-                    t.seeders.unwrap_or(0),
-                    group_tag
-                ),
-                url: stream_url,
-            })
-        })
-        .collect();
+           // IMPORTANTE: Título en UNA SOLA LÍNEA sin '\n' para compatibilidad con la TV
+           let clean_title = format!(
+               "{} | Seeders: {} | Grupo: {}",
+               t.title, seeders, group_tag
+           );
+
+           Some(StreamItem {
+               name: format!("⚡ Leydinime [{}]", res_tag),
+               title: clean_title,
+               url: stream_url,
+               behavior_hints: Some(StreamBehaviorHints {
+                   not_supported: false,
+               }),
+           })
+       })
+   .collect();
 
     Json(StreamResponse { streams })
 }
@@ -374,7 +386,7 @@ async fn resolve_stream_path(
         season,
         episode,
     )
-    .await;
+        .await;
 
     match stream_url {
         Some(url) => {
@@ -384,8 +396,8 @@ async fn resolve_stream_path(
         None => {
             eprintln!("❌ No se pudo resolver o no está listo en caché.");
             Err((
-                StatusCode::NOT_FOUND,
-                "El archivo no está en caché de AllDebrid",
+                    StatusCode::NOT_FOUND,
+                    "El archivo no está en caché de AllDebrid",
             ))
         }
     }
