@@ -2,6 +2,7 @@ mod db;
 mod enrich;
 mod nyaa;
 mod scraper;
+mod server;
 
 use clap::{Parser, Subcommand};
 use sqlx::mysql::MySqlPoolOptions;
@@ -28,6 +29,8 @@ enum Commands {
     DbSync,
     /// PASO 4: Indexa torrents desde Nyaa.si hacia MySQL
     Nyaa,
+    /// Inicializacion del server
+    Serve,
 }
 
 #[tokio::main]
@@ -59,6 +62,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pool = init_db_pool().await?;
             run_nyaa(&pool).await?;
         }
+        Commands::Serve => {
+            let pool = init_db_pool().await?;
+            let port = env::var("PORT")
+                .unwrap_or_else(|_| "7000".to_string())
+                .parse::<u16>()?;
+
+            server::run_server(pool, port).await?;
+        }
     }
 
     Ok(())
@@ -68,12 +79,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn init_db_pool() -> Result<MySqlPool, Box<dyn std::error::Error>> {
     let db_url = env::var("DATABASE_URL")
         .expect("La variable DATABASE_URL debe estar definida en el archivo .env");
-    
+
     let pool = MySqlPoolOptions::new()
         .max_connections(5)
         .connect(&db_url)
         .await?;
-        
+
     Ok(pool)
 }
 
@@ -91,7 +102,7 @@ async fn run_enrich() -> Result<(), Box<dyn std::error::Error>> {
         "animes_dump.jsonl",
         "animes_enriched.jsonl",
     )
-    .await
+        .await
 }
 
 async fn run_db_sync(pool: &MySqlPool) -> Result<(), Box<dyn std::error::Error>> {

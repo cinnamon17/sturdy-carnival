@@ -52,13 +52,11 @@ pub async fn scrape_nyaa_for_anime(
     anime_id: u64,
     query_title: &str,
 ) -> Result<Vec<TorrentRecord>, Box<dyn Error>> {
-    // Categoria 1_2: Anime - English-translated
     let encoded_query = urlencoding::encode(query_title);
     let rss_url = format!(
-        "https://nyaa.si/?page=rss&q={}&c=1_2&f=0",
+        "https://nyaa.si/?page=rss&q={}&c=0_0&f=0",
         encoded_query
     );
-
     let content = client.get(&rss_url).send().await?.bytes().await?;
     let channel = Channel::read_from(&content[..])?;
 
@@ -70,34 +68,57 @@ pub async fn scrape_nyaa_for_anime(
             None => continue,
         };
 
-        let link = match item.link() {
-            Some(l) => l.to_string(),
-            None => continue,
+        // 1. Obtener InfoHash y Seeders/Leechers de las extensiones XML <nyaa:*>
+        let mut info_hash = None;
+        let mut seeders = 0;
+        let mut leechers = 0;
+
+        if let Some(nyaa_ext) = item.extensions().get("nyaa") {
+            if let Some(hash_vec) = nyaa_ext.get("infoHash") {
+                if let Some(first) = hash_vec.first() {
+                    info_hash = first.value().map(|h| h.to_lowercase());
+                }
+            }
+            if let Some(s_vec) = nyaa_ext.get("seeders") {
+                if let Some(first) = s_vec.first() {
+                    seeders = first.value().unwrap_or("0").parse::<i32>().unwrap_or(0);
+                }
+            }
+            if let Some(l_vec) = nyaa_ext.get("leechers") {
+                if let Some(first) = l_vec.first() {
+                    leechers = first.value().unwrap_or("0").parse::<i32>().unwrap_or(0);
+                }
+            }
+        }
+
+        // Si no se encuentra en las extensiones, intentamos extraerlo de la descripción
+        let hash = match info_hash {
+            Some(h) => h,
+            None => match item.description().and_then(extract_info_hash) {
+                Some(h) => h,
+                None => continue, // Si realmente no hay hash, ignorar
+            },
         };
 
-        // Nyaa incluye el magnet o el enlace de descarga en el guid / enclosure
-        let magnet_link = item
-            .enclosure()
-            .map(|e| e.url().to_string())
-            .unwrap_or_else(|| link.clone());
-
-        let info_hash = match extract_info_hash(&magnet_link) {
-            Some(hash) => hash,
-            None => continue, // Ignorar si no podemos extraer un info_hash válido
-        };
+        // 2. Generar el enlace Magnet real para Stremio / AllDebrid
+        let magnet_link = format!(
+            "magnet:?xt=urn:btih:{}&dn={}",
+            hash,
+            urlencoding::encode(&title)
+        );
 
         let (release_group, episode, resolution) = parse_torrent_title(&title);
 
         records.push(TorrentRecord {
             anime_id,
             title,
-            info_hash,
+            info_hash: hash,
             magnet: magnet_link,
             episode,
             resolution,
             release_group,
-            seeders: 0,
-            leechers: 0,
+            seeders,
+            leechers,
         });
     }
 
@@ -205,11 +226,253 @@ pub async fn sync_nyaa_torrents_full(pool: &MySqlPool) -> Result<(), Box<dyn Err
     Ok(())
 }
 
+==> src/server.rs <==
+use axum::{
+    extract::{Path, State},
+    http::Method,
+    response::Json,
+    routing::get,
+    Router,
+};
+use serde::{Deserialize, Serialize};
+use sqlx::MySqlPool;
+use tower_http::cors::{Any, CorsLayer};
+
+// --- ESTRUCTURAS DEL MANIFEST Y STREMIO ---
+
+#[derive(Serialize)]
+struct Manifest {
+    id: String,
+    version: String,
+    name: String,
+    description: String,
+    resources: Vec<String>,
+    types: Vec<String>,
+    id_prefixes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behavior_hints: Option<BehaviorHints>,
+}
+
+#[derive(Serialize)]
+struct BehaviorHints {
+    configurable: bool,
+    configuration_required: bool,
+}
+
+#[derive(Serialize)]
+struct StreamResponse {
+    streams: Vec<StreamItem>,
+}
+
+#[derive(Serialize)]
+struct StreamItem {
+    name: String,
+    title: String,
+    url: String,
+}
+
+// --- CLIENTE ALLDEBRID DINÁMICO ---
+
+#[derive(Deserialize)]
+struct AdAgentResponse<T> {
+    status: String,
+    data: Option<T>,
+}
+
+#[derive(Deserialize)]
+struct AdUploadData {
+    magnets: Vec<AdMagnetResult>,
+}
+
+#[derive(Deserialize)]
+struct AdMagnetResult {
+    ready: bool,
+    links: Option<Vec<AdLink>>,
+}
+
+#[derive(Deserialize)]
+struct AdLink {
+    link: String,
+}
+
+#[derive(Deserialize)]
+struct AdUnlockData {
+    link: String,
+}
+
+/// Helper para consultar la API de AllDebrid usando la API Key enviada por el usuario
+async fn resolve_magnet_with_key(
+    client: &reqwest::Client,
+    api_key: &str,
+    magnet: &str,
+) -> Option<String> {
+    let upload_url = format!(
+        "https://api.alldebrid.com/v4/magnet/upload?agent=StremioAnimeIndexer&apikey={}&magnet={}",
+        api_key,
+        urlencoding::encode(magnet)
+    );
+
+    let res: AdAgentResponse<AdUploadData> =
+        client.get(&upload_url).send().await.ok()?.json().await.ok()?;
+
+    if res.status != "success" {
+        return None;
+    }
+
+    let data = res.data?;
+    let magnet_info = data.magnets.first()?;
+
+    if !magnet_info.ready {
+        return None;
+    }
+
+    let first_link = magnet_info.links.as_ref()?.first()?;
+    unlock_link_with_key(client, api_key, &first_link.link).await
+}
+
+async fn unlock_link_with_key(
+    client: &reqwest::Client,
+    api_key: &str,
+    link: &str,
+) -> Option<String> {
+    let unlock_url = format!(
+        "https://api.alldebrid.com/v4/link/unlock?agent=StremioAnimeIndexer&apikey={}&link={}",
+        api_key,
+        urlencoding::encode(link)
+    );
+
+    let res: AdAgentResponse<AdUnlockData> =
+        client.get(&unlock_url).send().await.ok()?.json().await.ok()?;
+
+    if res.status == "success" {
+        Some(res.data?.link)
+    } else {
+        None
+    }
+}
+
+// --- ESTADO COMPARTIDO DEL SERVIDOR ---
+
+#[derive(Clone)]
+pub struct AppState {
+    pub db: MySqlPool,
+    pub http_client: reqwest::Client,
+}
+
+// --- HANDLERS HTTP ---
+
+/// Manifest base (sin configurar, para cuando entren a la raíz)
+async fn get_base_manifest() -> Json<Manifest> {
+    Json(Manifest {
+        id: "com.stremio.anime.alldebrid.indexer".to_string(),
+        version: "1.0.0".to_string(),
+        name: "Anime AllDebrid Indexer".to_string(),
+        description: "Introduce tu API Key de AllDebrid en la URL para usar este addon.".to_string(),
+        resources: vec![],
+        types: vec!["series".to_string(), "movie".to_string()],
+        id_prefixes: vec!["tt".to_string(), "kitsu".to_string()],
+        behavior_hints: Some(BehaviorHints {
+            configurable: true,
+            configuration_required: true,
+        }),
+    })
+}
+
+/// Manifest ya configurado con la API Key del usuario
+async fn get_configured_manifest(Path(_api_key): Path<String>) -> Json<Manifest> {
+    Json(Manifest {
+        id: "com.stremio.anime.alldebrid.indexer".to_string(),
+        version: "1.0.0".to_string(),
+        name: "Anime AllDebrid Indexer".to_string(),
+        description: "Servidor de anime indexado con reproducción via tu cuenta de AllDebrid.".to_string(),
+        resources: vec!["stream".to_string()],
+        types: vec!["series".to_string(), "movie".to_string()],
+        id_prefixes: vec!["tt".to_string(), "kitsu".to_string()],
+        behavior_hints: None,
+    })
+}
+
+/// Endpoint `/stream/{type}/{id}.json` con la API Key del usuario en la ruta
+async fn get_streams(
+    Path((api_key, _type, id)): Path<(String, String, String)>,
+    State(state): State<AppState>,
+) -> Json<StreamResponse> {
+    let clean_id = id.split(':').next().unwrap_or(&id);
+
+    // 1. Buscar torrents coincidentes en MySQL
+    let db_torrents = sqlx::query!(
+        r#"
+        SELECT t.title, t.magnet, t.resolution, t.seeders, t.release_group
+        FROM torrents t
+        INNER JOIN animes a ON t.anime_id = a.mal_id
+        WHERE a.imdb_id = ? OR CAST(a.kitsu_id AS CHAR) = ?
+        ORDER BY t.seeders DESC
+        LIMIT 10
+        "#,
+        clean_id,
+        clean_id
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let mut streams = Vec::new();
+
+    // 2. Resolver con AllDebrid usando la API key dinámica del usuario
+    for t in db_torrents {
+        if let Some(stream_url) = resolve_magnet_with_key(&state.http_client, &api_key, &t.magnet).await {
+            let seeders_count = t.seeders.unwrap_or(0); 
+            let res_tag = t.resolution.unwrap_or_else(|| "SD".to_string());
+            let group_tag = t.release_group.unwrap_or_else(|| "RAW".to_string());
+
+            streams.push(StreamItem {
+                name: format!("⚡ AllDebrid [{}]", res_tag),
+                title: format!("{}\n👥 Seeders: {} | 👥 Grupo: {}", t.title, seeders_count, group_tag),
+                url: stream_url,
+            });
+        }
+    }
+
+    Json(StreamResponse { streams })
+}
+
+// --- FUNCIÓN PRINCIPAL DE ARRANQUE ---
+
+pub async fn run_server(pool: MySqlPool, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let state = AppState {
+        db: pool,
+        http_client: reqwest::Client::new(),
+    };
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(vec![Method::GET])
+        .allow_headers(Any);
+
+    let app = Router::new()
+        // Manifest sin configurar
+        .route("/manifest.json", get(get_base_manifest))
+        // Manifest + Stream con la API key en la ruta
+        .route("/:api_key/manifest.json", get(get_configured_manifest))
+        .route("/:api_key/stream/:type/:id", get(get_streams))
+        .layer(cors)
+        .with_state(state);
+
+    let addr = format!("0.0.0.0:{}", port);
+    println!("🚀 Servidor Stremio escuchando en http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
 ==> src/main.rs <==
 mod db;
 mod enrich;
 mod nyaa;
 mod scraper;
+mod server;
 
 use clap::{Parser, Subcommand};
 use sqlx::mysql::MySqlPoolOptions;
@@ -236,6 +499,8 @@ enum Commands {
     DbSync,
     /// PASO 4: Indexa torrents desde Nyaa.si hacia MySQL
     Nyaa,
+    /// Inicializacion del server
+    Serve,
 }
 
 #[tokio::main]
@@ -267,6 +532,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let pool = init_db_pool().await?;
             run_nyaa(&pool).await?;
         }
+        Commands::Serve => {
+            let pool = init_db_pool().await?;
+            let port = env::var("PORT")
+                .unwrap_or_else(|_| "7000".to_string())
+                .parse::<u16>()?;
+
+            server::run_server(pool, port).await?;
+        }
     }
 
     Ok(())
@@ -276,12 +549,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn init_db_pool() -> Result<MySqlPool, Box<dyn std::error::Error>> {
     let db_url = env::var("DATABASE_URL")
         .expect("La variable DATABASE_URL debe estar definida en el archivo .env");
-    
+
     let pool = MySqlPoolOptions::new()
         .max_connections(5)
         .connect(&db_url)
         .await?;
-        
+
     Ok(pool)
 }
 
@@ -299,7 +572,7 @@ async fn run_enrich() -> Result<(), Box<dyn std::error::Error>> {
         "animes_dump.jsonl",
         "animes_enriched.jsonl",
     )
-    .await
+        .await
 }
 
 async fn run_db_sync(pool: &MySqlPool) -> Result<(), Box<dyn std::error::Error>> {
