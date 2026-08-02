@@ -361,10 +361,13 @@ async fn get_streams(
             // Encodeamos el magnet para pasarlo seguro por URL
             let encoded_magnet = urlencoding::encode(&t.magnet);
 
+            let base_url = std::env::var("BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:7000".to_string());
+
             // Añadimos season y episode a la URL proxy
             let stream_url = format!(
-                "http://localhost:7000/resolve?key={}&season={}&episode={}&magnet={}",
-                api_key, season, episode, encoded_magnet
+                "{}/resolve?key={}&season={}&episode={}&magnet={}",
+                base_url, api_key, season, episode, encoded_magnet
             );
 
             StreamItem {
