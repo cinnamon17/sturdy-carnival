@@ -56,8 +56,8 @@ El proyecto consta de 4 etapas de procesamiento ETL más un motor de servidor we
 
 1. Clona el repositorio:
    ```bash
-   git clone [https://github.com/tu-usuario/anime-stremio-pipeline.git](https://github.com/tu-usuario/anime-stremio-pipeline.git)
-   cd anime-stremio-pipeline
+   git clone https://github.com/cinnamon17/sturdy-carnival.git
+   cd sturdy-carnival
 
 2. Crea un archivo `.env` en la raíz del proyecto basándote en la siguiente plantilla:
 
@@ -84,7 +84,7 @@ El ejecutable optimizado se generará en `./target/release/sturdy-carnival`.
 
 ### 💻 Subcomandos Disponibles
 
-Puedes ejecutar subcomandos con `cargo run -- <comando>` o mediante el binario `./target/release/stremio_anime_indexer <comando>`:
+Puedes ejecutar subcomandos con `cargo run -- <comando>` o mediante el binario `./target/release/sturdy-carnival <comando>`:
 
 | Comando | Descripción |
 | --- | --- |
