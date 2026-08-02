@@ -463,8 +463,10 @@ pub async fn run_server(pool: MySqlPool, port: u16) -> Result<(), Box<dyn std::e
         .layer(cors)
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", port);
-    println!("🚀 Servidor Stremio optimizado escuchando en http://{}", addr);
+    let bind_host = std::env::var("BIND_HOST")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr = format!("{}:{}", bind_host, port);
+    println!("🚀 Servidor Stremio optimizado escuchando en {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
