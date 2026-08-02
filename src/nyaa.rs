@@ -137,12 +137,17 @@ pub async fn sync_nyaa_torrents_full(pool: &MySqlPool) -> Result<(), Box<dyn Err
     let mut total_processed = 0;
 
     loop {
-        // Obtenemos los animes que NUNCA se han escrapeado o tienen el scraping más antiguo
+        // Obtenemos los animes que NUNCA se han escrapeado 
+        // O cuyo escrapeo ocurrió hace MÁS de 24 horas.
         let rows = sqlx::query!(
             r#"
             SELECT mal_id, title 
             FROM animes 
             WHERE status != 'Not yet aired'
+              AND (
+                last_scraped_at IS NULL 
+                OR last_scraped_at < NOW() - INTERVAL 24 HOUR
+              )
             ORDER BY last_scraped_at IS NOT NULL, last_scraped_at ASC 
             LIMIT ?
             "#,
@@ -215,7 +220,7 @@ pub async fn sync_nyaa_torrents_full(pool: &MySqlPool) -> Result<(), Box<dyn Err
             }
 
             // Pausa de 2 segundos entre peticiones para mantener el proceso seguro durante la noche
-            sleep(Duration::from_millis(2000)).await;
+            sleep(Duration::from_millis(1000)).await;
         }
 
         println!("--- Lote de {} animes completado. Guardando avance... ---", rows.len());
