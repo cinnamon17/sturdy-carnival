@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{Method, StatusCode},
     response::{Json, Redirect},
     routing::get,
@@ -71,9 +71,9 @@ struct AdFilesData {
 #[derive(Deserialize, Debug)]
 struct AdFilesMagnet {
     #[allow(dead_code)]
-    id: Value, // Puede venir como int o string ("123" o 123)
-    files: Option<Vec<AdFileNode>>, // Usamos Option porque si hay error no existe 'files'
-    error: Option<AdFilesError>,    // Captura errores tipo MAGNET_INVALID_ID
+    id: Value,
+    files: Option<Vec<AdFileNode>>,
+    error: Option<AdFilesError>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -86,10 +86,10 @@ struct AdFilesError {
 
 #[derive(Deserialize, Debug)]
 struct AdFileNode {
-    n: Option<String>,          // Nombre del archivo o carpeta
-    l: Option<String>,          // URL web para unlock (solo presente en archivos)
+    n: Option<String>,
+    l: Option<String>,
     #[serde(default)]
-    e: Vec<AdFileNode>,         // Subarchivos o subcarpetas
+    e: Vec<AdFileNode>,
 }
 
 // 3. Respuesta de /link/unlock
@@ -106,15 +106,12 @@ async fn resolve_magnet_with_key(
     _season: u32,
     episode: u32,
 ) -> Option<String> {
-    // -------------------------------------------------------------
     // PASO 1: Subir / Registrar el Magnet
-    // -------------------------------------------------------------
     let upload_url = format!(
         "https://api.alldebrid.com/v4/magnet/upload?agent=StremioAnimeIndexer&apikey={}&magnet={}",
         api_key,
         urlencoding::encode(magnet)
     );
-
     let upload_res: AdAgentResponse<AdUploadData> = client
         .get(&upload_url)
         .timeout(Duration::from_secs(5))
@@ -127,7 +124,6 @@ async fn resolve_magnet_with_key(
 
     let upload_data = upload_res.data?;
     let magnet_info = upload_data.magnets.first()?;
-
     let magnet_id_str = match &magnet_info.id {
         Value::String(s) => s.clone(),
         Value::Number(n) => n.to_string(),
@@ -135,23 +131,18 @@ async fn resolve_magnet_with_key(
     };
 
     println!("📊 Estado del magnet -> Ready: {}, ID: {}", magnet_info.ready, magnet_id_str);
-
     if !magnet_info.ready {
         eprintln!("⚠️ El magnet NO está disponible en la caché de AllDebrid.");
         return None;
     }
 
-    // -------------------------------------------------------------
     // PASO 2: Obtener los archivos del Magnet (/magnet/files vía POST)
-    // -------------------------------------------------------------
-    println!("🔍 2. Consultando /magnet/files vía POST para id[]={}...", magnet_id_str);
-
+    println!("🔍 Consultando /magnet/files vía POST para id[]={}...", magnet_id_str);
     let files_url = format!(
         "https://api.alldebrid.com/v4/magnet/files?agent=StremioAnimeIndexer&apikey={}",
         api_key
     );
 
-    // Enviamos como Form POST con la clave `id[]` exacta que pide la API
     let files_resp = client
         .post(&files_url)
         .form(&[("id[]", &magnet_id_str)])
@@ -161,7 +152,6 @@ async fn resolve_magnet_with_key(
         .ok()?;
 
     let body_text = files_resp.text().await.ok()?;
-
     let files_res: AdAgentResponse<AdFilesData> = match serde_json::from_str(&body_text) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -174,19 +164,16 @@ async fn resolve_magnet_with_key(
     let files_data = files_res.data?;
     let files_magnet = files_data.magnets.first()?;
 
-    // Verificar si AllDebrid devolvió un error para este ID
     if let Some(err) = &files_magnet.error {
         eprintln!("❌ Error de AllDebrid para este magnet: {:?}", err);
         return None;
     }
 
     let raw_files = files_magnet.files.as_ref()?;
-
     let mut all_files: Vec<(String, String)> = Vec::new();
     flatten_files(raw_files, &mut all_files);
 
     println!("📁 Archivos extraídos del torrent: {}", all_files.len());
-
     if all_files.is_empty() {
         eprintln!("⚠️ No se encontraron enlaces de archivos en la respuesta.");
         return None;
@@ -195,7 +182,6 @@ async fn resolve_magnet_with_key(
     // Filtrar episodios y seleccionar el archivo de vídeo
     let ep_str_padded = format!("{:02}", episode);
     let ep_str_three = format!("{:03}", episode);
-
     let selected_file = all_files
         .iter()
         .find(|(name, _)| {
@@ -210,18 +196,16 @@ async fn resolve_magnet_with_key(
                 || n.contains(&format!(" - {}", ep_str_three))
                 || n.contains(&format!(" {} ", ep_str_padded))
         })
-    .or_else(|| {
-        all_files.iter().find(|(name, _)| {
-            let n = name.to_lowercase();
-            n.ends_with(".mkv") || n.ends_with(".mp4") || n.ends_with(".avi")
-        })
-    })?;
+        .or_else(|| {
+            all_files.iter().find(|(name, _)| {
+                let n = name.to_lowercase();
+                n.ends_with(".mkv") || n.ends_with(".mp4") || n.ends_with(".avi")
+            })
+        })?;
 
     println!("🎬 Archivo seleccionado para reproducir: {}", selected_file.0);
 
-    // -------------------------------------------------------------
     // PASO 3: Desbloquear el enlace web del archivo seleccionado
-    // -------------------------------------------------------------
     unlock_link_with_key(client, api_key, &selected_file.1).await
 }
 
@@ -247,7 +231,6 @@ async fn unlock_link_with_key(
         api_key,
         urlencoding::encode(link)
     );
-
     let res: AdAgentResponse<AdUnlockData> = client
         .get(&unlock_url)
         .timeout(Duration::from_secs(4))
@@ -283,13 +266,13 @@ async fn get_base_manifest() -> Json<Manifest> {
         name: "Leydinime".to_string(),
         description: "Introduce tu API Key de AllDebrid en la URL para usar este addon."
             .to_string(),
-            resources: vec![],
-            types: vec!["series".to_string(), "movie".to_string()],
-            id_prefixes: vec!["tt".to_string(), "kitsu".to_string()],
-            behavior_hints: Some(BehaviorHints {
-                configurable: true,
-                configuration_required: true,
-            }),
+        resources: vec![],
+        types: vec!["series".to_string(), "movie".to_string()],
+        id_prefixes: vec!["tt".to_string(), "kitsu".to_string()],
+        behavior_hints: Some(BehaviorHints {
+            configurable: true,
+            configuration_required: true,
+        }),
     })
 }
 
@@ -300,41 +283,35 @@ async fn get_configured_manifest(Path(_api_key): Path<String>) -> Json<Manifest>
         name: "Leydinime".to_string(),
         description: "Servidor de anime indexado con reproducción via tu cuenta de AllDebrid."
             .to_string(),
-            resources: vec!["stream".to_string()],
-            types: vec!["series".to_string(), "movie".to_string()],
-            id_prefixes: vec!["tt".to_string(), "kitsu".to_string()],
-            behavior_hints: None,
+        resources: vec!["stream".to_string()],
+        types: vec!["series".to_string(), "movie".to_string()],
+        id_prefixes: vec!["tt".to_string(), "kitsu".to_string()],
+        behavior_hints: None,
     })
 }
 
-/// Endpoint `/stream/{type}/{id}.json` optimizado con peticiones en PARALELO
+/// Endpoint `/stream/{type}/{id}.json`
 async fn get_streams(
     Path((api_key, _type, id)): Path<(String, String, String)>,
     State(state): State<AppState>,
 ) -> Json<StreamResponse> {
-    let clean_id = id.trim_end_matches(".json");
+    let raw_id = id.trim_end_matches(".json");
+    let decoded_id = urlencoding::decode(raw_id)
+        .unwrap_or_else(|_| raw_id.into())
+        .into_owned();
 
-    // Extraer ID y posibles parámetros de temporada/episodio (ej. tt0434693:1:1)
-    let parts: Vec<&str> = clean_id.split(':').collect();
+    let parts: Vec<&str> = decoded_id.split(':').collect();
     let base_id = parts[0];
     let season: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
     let episode: u32 = parts.get(2).and_then(|e| e.parse().ok()).unwrap_or(1);
 
-    let imdb_id = if base_id.starts_with("tt") {
-        Some(base_id)
-    } else {
-        None
-    };
-    let mal_id = if !base_id.starts_with("tt") {
-        base_id.parse::<u64>().ok()
-    } else {
-        None
-    };
+    let imdb_id = if base_id.starts_with("tt") { Some(base_id) } else { None };
+    let mal_id = if !base_id.starts_with("tt") { base_id.parse::<u64>().ok() } else { None };
 
-    // 1. Solo consultamos MySQL
+    // 1. Consultar MySQL solicitando info_hash
     let db_torrents = sqlx::query!(
         r#"
-        SELECT t.title, t.magnet, t.resolution, t.seeders, t.release_group
+        SELECT t.title, t.info_hash, t.resolution, t.seeders, t.release_group
         FROM torrents t
         INNER JOIN animes a ON t.anime_id = a.mal_id
         WHERE (? IS NOT NULL AND a.imdb_id = ?)
@@ -342,35 +319,30 @@ async fn get_streams(
         ORDER BY t.seeders DESC
         LIMIT 10
         "#,
-        imdb_id,
-        imdb_id,
-        mal_id,
-        mal_id
+        imdb_id, imdb_id, mal_id, mal_id
     )
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
 
-    // 2. Construimos la lista INMEDIATAMENTE sin llamar a AllDebrid aún
+    let base_url = std::env::var("BASE_URL")
+        .unwrap_or_else(|_| "https://stremio.lify.win".to_string());
+
+    // 2. Construir la lista de streams usando t.info_hash
     let streams = db_torrents
         .into_iter()
-        .map(|t| {
+        .filter_map(|t| {
+            let hash = t.info_hash; 
             let res_tag = t.resolution.unwrap_or_else(|| "SD".to_string());
             let group_tag = t.release_group.unwrap_or_else(|| "RAW".to_string());
 
-            // Encodeamos el magnet para pasarlo seguro por URL
-            let encoded_magnet = urlencoding::encode(&t.magnet);
-
-            let base_url = std::env::var("BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:7000".to_string());
-
-            // Añadimos season y episode a la URL proxy
+            // URL corta y limpia sin extensión
             let stream_url = format!(
-                "{}/resolve?key={}&season={}&episode={}&magnet={}",
-                base_url, api_key, season, episode, encoded_magnet
+                "{}/resolve/{}/{}/{}/{}",
+                base_url, api_key, season, episode, hash
             );
 
-            StreamItem {
+            Some(StreamItem {
                 name: format!("⚡ [Leydinime] [{}]", res_tag),
                 title: format!(
                     "{}\n👥 Seeders: {} | 👥 Grupo: {}",
@@ -379,60 +351,41 @@ async fn get_streams(
                     group_tag
                 ),
                 url: stream_url,
-            }
+            })
         })
-    .collect();
+        .collect();
 
     Json(StreamResponse { streams })
 }
 
-// --- HANDLER: /resolve (Se ejecuta SOLO al pulsar Play) ---
-#[derive(Deserialize)]
-struct ResolveParams {
-    key: String,
-    season: Option<u32>,
-    episode: Option<u32>,
-    magnet: String,
-}
-
-async fn resolve_stream(
-    Query(params): Query<ResolveParams>,
+// --- HANDLER: /resolve por Path (Limpio para Smart TVs) ---
+async fn resolve_stream_path(
+    Path((key, season, episode, hash)): Path<(String, u32, u32, String)>,
     State(state): State<AppState>,
 ) -> Result<Redirect, (StatusCode, &'static str)> {
-    let first_decode = urlencoding::decode(&params.magnet)
-        .unwrap_or_else(|_| params.magnet.clone().into())
-        .into_owned();
+    let clean_magnet = format!("magnet:?xt=urn:btih:{}", hash);
 
-    let clean_magnet = if first_decode.contains("%25") {
-        urlencoding::decode(&first_decode)
-            .unwrap_or_else(|_| first_decode.clone().into())
-            .into_owned()
-    } else {
-        first_decode
-    };
+    println!("🧲 Resolviendo Hash: {} para T{}:E{}", hash, season, episode);
 
-    println!("🧲 Magnet final procesado: {}", clean_magnet);
-
-    // Intentar resolver el magnet en AllDebrid
     let stream_url = resolve_magnet_with_key(
         &state.http_client,
-        &params.key,
+        &key,
         &clean_magnet,
-        params.season.unwrap_or(1),
-        params.episode.unwrap_or(1),
+        season,
+        episode,
     )
-        .await;
+    .await;
 
     match stream_url {
         Some(url) => {
-            println!("✅ Redirigiendo a enlace directo: {}", url);
-            Ok(Redirect::to(&url))
+            println!("✅ Redirigiendo Smart TV (HTTP 307) a: {}", url);
+            Ok(Redirect::temporary(&url))
         }
         None => {
             eprintln!("❌ No se pudo resolver o no está listo en caché.");
             Err((
-                    StatusCode::NOT_FOUND,
-                    "El archivo no está en caché de AllDebrid",
+                StatusCode::NOT_FOUND,
+                "El archivo no está en caché de AllDebrid",
             ))
         }
     }
@@ -452,14 +405,15 @@ pub async fn run_server(pool: MySqlPool, port: u16) -> Result<(), Box<dyn std::e
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
-        .allow_methods(vec![Method::GET])
+        .allow_methods(vec![Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers(Any);
 
     let app = Router::new()
         .route("/manifest.json", get(get_base_manifest))
         .route("/{api_key}/manifest.json", get(get_configured_manifest))
         .route("/{api_key}/stream/{media_type}/{id}", get(get_streams))
-        .route("/resolve", get(resolve_stream))
+        // Nueva ruta limpia de resolución
+        .route("/resolve/{key}/{season}/{episode}/{hash}", get(resolve_stream_path))
         .layer(cors)
         .with_state(state);
 
@@ -470,6 +424,5 @@ pub async fn run_server(pool: MySqlPool, port: u16) -> Result<(), Box<dyn std::e
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
-
     Ok(())
 }
