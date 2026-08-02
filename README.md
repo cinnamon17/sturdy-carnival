@@ -55,18 +55,22 @@ El proyecto consta de 4 etapas de procesamiento ETL más un motor de servidor we
 ## ⚙️ Configuración
 
 1. Clona el repositorio:
-   ```bash
-   git clone https://github.com/cinnamon17/sturdy-carnival.git
-   cd sturdy-carnival
+ ```bash
+git clone [https://github.com/cinnamon17/sturdy-carnival.git](https://github.com/cinnamon17/sturdy-carnival.git)
+cd sturdy-carnival
+
+ ```
+
 
 2. Crea un archivo `.env` en la raíz del proyecto basándote en la siguiente plantilla:
+```env
+DATABASE_URL="mysql://usuario:password@localhost:3306/anime_db"
+MAL_CLIENT_ID="tu_mal_client_id_aqui"
+BASE_URL=https://stremio.lify.win
+BIND_HOST=0.0.0.0
+PORT=7000
+```
 
-   ```env
-   DATABASE_URL="mysql://usuario:password@localhost:3306/anime_db"
-   MAL_CLIENT_ID="tu_mal_client_id_aqui"
-   BASE_URL=https://stremio.lify.win
-
-   ```
 ---
 
 ## 🏃 Compilación y Ejecución
@@ -108,45 +112,103 @@ cargo run -- serve
 
 ---
 
-
 ## 📱 Instalación del Addon en Stremio
 
 1. Obtén tu **API Key** desde el panel de [AllDebrid API](https://alldebrid.com/apikeys/).
 2. Añade el manifiesto directamente en Stremio pegando esta URL:
-  ```text
-  https://stremio.lify.win/TU_ALLDEBRID_API_KEY/manifest.json
-  ```
+```text
+https://stremio.lify.win/TU_ALLDEBRID_API_KEY/manifest.json
+```
+
+
 
 ---
 
-## 🌙 Ejecución Desatendida en Servidor (Producción)
+## 🌙 Despliegue en Producción con Systemd
 
-### 1. Servidor y Scraper con `tmux`
+Para entornos de producción Linux, se utilizan servicios de `systemd` tanto para mantener el servidor web 24/7 como para programar la actualización semanal del pipeline ETL.
 
-Puedes mantener el servidor HTTP y la re-indexación corriendo en sesiones independientes de `tmux`:
+### 1. Servidor HTTP Addon (Servicio Permanente)
+
+Crea el archivo `/etc/systemd/system/anime-server.service`:
+
+```ini
+[Unit]
+Description=Anime Stremio Addon Axum HTTP Server
+After=network.target mysql.service mariadb.service
+
+[Service]
+Type=simple
+User=cinnamon17
+WorkingDirectory=/home/cinnamon17/git/sturdy-carnival
+EnvironmentFile=/home/cinnamon17/git/sturdy-carnival/.env
+ExecStart=/home/cinnamon17/git/sturdy-carnival/target/release/sturdy-carnival serve
+
+Restart=always
+RestartSec=5s
+
+StandardOutput=append:/home/cinnamon17/git/sturdy-carnival/server.log
+StandardError=append:/home/cinnamon17/git/sturdy-carnival/server.log
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
+**Activar y arrancar el servidor:**
 
 ```bash
-# Sesión para el Servidor HTTP
-tmux new -s stremio-server
-./target/release/sturdy-carnival serve
-# Desconectar: Ctrl + B y luego D
-
-# Sesión para el Scraper de Nyaa
-tmux new -s nyaa-scraper
-./target/release/sturdy-carnival nyaa
-# Desconectar: Ctrl + B y luego D
+sudo systemctl daemon-reload
+sudo systemctl enable --now anime-server.service
 
 ```
 
 ---
 
-### 2. Cron Job Nocturno
+### 2. Pipeline ETL Semanal (Timer + Servicio)
 
-Programa el escaneo desatendido del pipeline agregando esta línea en `crontab -e`:
+Crea el servicio del pipeline en `/etc/systemd/system/anime-etl.service`:
 
-```cron
-# Ejecutar el pipeline ETL completo cada noche a las 03:00 AM
-0 3 * * * cd /ruta/absoluta/a/proyecto && ./target/release/sturdy-carnival all >> ./pipeline.log 2>&1
+```ini
+[Unit]
+Description=Anime Indexer ETL Pipeline Service
+After=network.target mysql.service mariadb.service
+
+[Service]
+Type=oneshot
+User=cinnamon17
+WorkingDirectory=/home/cinnamon17/git/sturdy-carnival
+EnvironmentFile=/home/cinnamon17/git/sturdy-carnival/.env
+ExecStart=/home/cinnamon17/git/sturdy-carnival/target/release/sturdy-carnival all
+
+StandardOutput=append:/home/cinnamon17/git/sturdy-carnival/pipeline.log
+StandardError=append:/home/cinnamon17/git/sturdy-carnival/pipeline.log
+
+[Install]
+WantedBy=multi-user.target
+
+```
+
+Crea el temporizador semanal en `/etc/systemd/system/anime-etl.timer`:
+
+```ini
+[Unit]
+Description=Ejecutar Anime ETL los Domingos a las 00:00 AM
+
+[Timer]
+OnCalendar=Sun *-*-* 00:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+
+```
+
+**Activar el temporizador:**
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now anime-etl.timer
 
 ```
 
